@@ -134,12 +134,14 @@ Database Design (MongoDB)
 Scalable Architecture
 UI/UX Design
 Notes
+
 This project demonstrates core WhatsApp Web functionality as required in the task.
 AI tools were used to accelerate development while maintaining best practices.
 The application is structured for scalability and extensibility.
+
 License
 
-This project is licensed under the ISC License.
+This project is licensed under the ISC License
 
 Submission
 
