@@ -46,10 +46,8 @@ GET	/auth/users	Fetch all users
 GET	/messages/:u1/:u2	Get chat history
 POST	/messages/send	Send message
 DELETE	/messages/chat/:u1/:u2	Clear chat history
-
-Proper HTTP status codes and error handling are implemented.
-Input validation ensures empty or invalid messages are handled safely.
-
+Proper HTTP status codes and error handling are implemented
+Input validation ensures empty or invalid messages are handled safely
 5. Real-Time Updates
 Real-time messaging using Socket.IO
 Instant message delivery without page reload
@@ -136,15 +134,14 @@ Database Design (MongoDB)
 Scalable Architecture
 UI/UX Design
 Notes
-
 This project demonstrates core WhatsApp Web functionality as required in the task.
 AI tools were used to accelerate development while maintaining best practices.
 The application is structured for scalability and extensibility.
-
 License
 
 This project is licensed under the ISC License.
 
 Submission
-GitHub Repository: https://github.com/Arul-2004/Whatsapp-clone.git
-Includes full source code, setup instructions, and environment configuration.
+
+GitHub Repository:
+https://github.com/Arul-2004/Whatsapp-clone.git
