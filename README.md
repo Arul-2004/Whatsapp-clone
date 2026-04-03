@@ -126,3 +126,7 @@ GitHub: https://github.com/Arul-2004/Whatsapp-clone.git
 ## Output screenshots
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/05eeb3139a8def72212f0f5e96a643d6a5653a50/Screenshot%202026-04-03%20170432.png)
+
+![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/83c9be5abd9fc47916f8bffaf1167273ba762db9/Screenshot%202026-04-03%20170502.png)
+
+![image alt](
