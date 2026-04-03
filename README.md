@@ -144,4 +144,4 @@ GitHub: https://github.com/Arul-2004/Whatsapp-clone.git
 ## Voice Call 
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/6d50b2c832248a47feae3dd60a509434fc17d588/Screenshot%202026-04-03%20183131.png)
-## viedeo call
+## video call
