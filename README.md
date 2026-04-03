@@ -126,15 +126,22 @@ GitHub: https://github.com/Arul-2004/Whatsapp-clone.git
 ## Output screenshots
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/05eeb3139a8def72212f0f5e96a643d6a5653a50/Screenshot%202026-04-03%20170432.png)
+## Home page
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/83c9be5abd9fc47916f8bffaf1167273ba762db9/Screenshot%202026-04-03%20170502.png)
+## Instruction Page
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/6d50b2c832248a47feae3dd60a509434fc17d588/Screenshot%202026-04-03%20170524.png)
+## Register user details
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/6d50b2c832248a47feae3dd60a509434fc17d588/Screenshot%202026-04-03%20170540.png)
+## Login page
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/6d50b2c832248a47feae3dd60a509434fc17d588/Screenshot%202026-04-03%20183053.png)
+## Chat Portal
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/6d50b2c832248a47feae3dd60a509434fc17d588/Screenshot%202026-04-03%20183111.png)
+## Voice Call 
 
 ![image alt](https://github.com/Arul-2004/Whatsapp-clone/blob/6d50b2c832248a47feae3dd60a509434fc17d588/Screenshot%202026-04-03%20183131.png)
+## viedeo call
