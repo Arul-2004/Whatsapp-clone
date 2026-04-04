@@ -490,7 +490,11 @@ const Chat = () => {
                 (String(message.sender) === String(user.id) && String(message.receiver) === String(su?._id));
 
             if (isCurrent) {
-                setMessages(prev => [...prev, message]);
+                setMessages(prev => {
+                    // Prevent duplicate messages in the UI
+                    if (message._id && prev.find(m => m._id === message._id)) return prev;
+                    return [...prev, message];
+                });
             } else {
                 // Not selected? Increment unread count
                 const senderId = String(message.sender);
@@ -927,7 +931,13 @@ const Chat = () => {
                                                 placeholder="Type a message"
                                                 value={newMessage}
                                                 onChange={e => setNewMessage(e.target.value)}
-                                                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) handleSendMessage(e); }}
+                                                onKeyDown={e => {
+                                                    // Only handle actual line breaks with Shift+Enter if needed, 
+                                                    // but for standard text input, Enter alone triggers form submit.
+                                                    if (e.key === 'Enter' && e.shiftKey) {
+                                                        // Handle shift+enter if this were a textarea, but it's an input
+                                                    }
+                                                }}
                                             />
                                             {newMessage.trim() || attachPreview ? (
                                                 <button type="submit" style={s.iconBtn}>
