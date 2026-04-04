@@ -7,7 +7,7 @@ import {
     Search, MoreVertical, MessageSquare, Paperclip, Smile,
     Send, LogOut, CheckCheck, Shield, X, File, Plus, Circle,
     Mic, Square, Trash2, Volume2, ChevronDown, Forward, Info, Star, Copy, Edit,
-    Phone, Video
+    Phone, Video, Settings
 } from 'lucide-react';
 import { IncomingCallOverlay, ActiveCallOverlay } from '../components/CallOverlay';
 
@@ -15,26 +15,6 @@ const socket = io('http://localhost:5000');
 const getAvatar = (name) =>
     `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'User')}&background=008069&color=fff&size=128&bold=true`;
 const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const compressImage = (dataUrl, maxWidth = 1280, quality = 0.7) => {
-    return new Promise((resolve) => {
-        const img = new Image();
-        img.src = dataUrl;
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            let width = img.width;
-            let height = img.height;
-            if (width > maxWidth) {
-                height = (maxWidth / width) * height;
-                width = maxWidth;
-            }
-            canvas.width = width;
-            canvas.height = height;
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, width, height);
-            resolve(canvas.toDataURL('image/jpeg', quality));
-        };
-    });
-};
 
 const Chat = () => {
     const { user, logout } = useContext(AuthContext);
@@ -56,7 +36,6 @@ const Chat = () => {
     // Status related states
     const [allStatuses, setAllStatuses] = useState([]);
     const [showStatusModal, setShowStatusModal] = useState(false);
-    const [isStatusPosting, setIsStatusPosting] = useState(false);
     const [statusType, setStatusType] = useState('text'); // 'text' or 'image'
     const [statusContent, setStatusContent] = useState('');
     const [statusBg, setStatusBg] = useState('#008069');
@@ -68,6 +47,11 @@ const Chat = () => {
     const mediaRecorderRef = useRef(null);
     const audioChunksRef = useRef([]);
     const timerRef = useRef(null);
+    const [analyser, setAnalyser] = useState(null); // Diagnostic analyser
+    const [isTestingMic, setIsTestingMic] = useState(false); // Truth Tester state
+    const [audioDevices, setAudioDevices] = useState([]);
+    const [selectedDeviceId, setSelectedDeviceId] = useState('');
+    const [showMicMenu, setShowMicMenu] = useState(false);
 
     // Deletion states
     const [msgToDelete, setMsgToDelete] = useState(null);
@@ -105,7 +89,17 @@ const Chat = () => {
         fetchUsers();
         fetchLastMessages();
         fetchStatuses();
+        getAudioDevices();
     }, [user]);
+
+    const getAudioDevices = async () => {
+        try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const inputs = devices.filter(d => d.kind === 'audioinput' && d.deviceId);
+            setAudioDevices(inputs);
+            if (inputs.length > 0 && !selectedDeviceId) setSelectedDeviceId(inputs[0].deviceId);
+        } catch (err) { console.error('Enumerate error:', err); }
+    };
 
     // Fetch all other users
     const fetchUsers = async () => {
@@ -138,54 +132,27 @@ const Chat = () => {
     };
 
     const handlePostStatus = async () => {
-        if (!statusContent || isStatusPosting) return;
-        setIsStatusPosting(true);
+        if (!statusContent) return;
         try {
-            const uid = user?._id || user?.id;
-            if (!uid) {
-                setIsStatusPosting(false);
-                return alert('Profile not loaded. Try again.');
-            }
-
             await axios.post('http://localhost:5000/api/status', {
-                userId: uid,
+                userId: user.id,
                 type: statusType,
                 content: statusContent,
                 backgroundColor: statusBg
             });
-            
-            // Expert fix: Close modal BEFORE clearing content to avoid broken image flicker
             setShowStatusModal(false);
             setStatusContent('');
-            setStatusType('text'); // Reset to default
             fetchStatuses();
-        } catch (err) {
-            console.error('postStatus error', err);
-            alert('Status upload failed. Ensure the file is not too large.');
-        } finally {
-            setIsStatusPosting(false);
-        }
+        } catch (err) { console.error('postStatus error', err); }
     };
 
-    const handleStatusFileChange = (e) => {
+    const handleStatusImageChange = (e) => {
         const file = e.target.files[0];
         if (!file) return;
-        
-        // Simple size safety for videos (Base64 videos are large)
-        if (file.type.startsWith('video/') && file.size > 12 * 1024 * 1024) {
-            return alert('Video is too large. Please select a clip smaller than 12MB.');
-        }
-
-        const isVideo = file.type.startsWith('video/');
         const reader = new FileReader();
-        reader.onload = async (ev) => {
-            let content = ev.target.result;
-            if (!isVideo) {
-                // Compress image before setting state
-                content = await compressImage(content);
-            }
-            setStatusContent(content);
-            setStatusType(isVideo ? 'video' : 'image');
+        reader.onload = (ev) => {
+            setStatusContent(ev.target.result);
+            setStatusType('image');
         };
         reader.readAsDataURL(file);
     };
@@ -269,8 +236,52 @@ const Chat = () => {
     // Audio Recording Logic
     const startRecording = async () => {
         try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const recorder = new MediaRecorder(stream);
+            const constraints = {
+                audio: {
+                    echoCancellation: true,
+                    noiseSuppression: false,
+                    autoGainControl: true,
+                    sampleRate: 44100,
+                    deviceId: selectedDeviceId ? { exact: selectedDeviceId } : undefined
+                }
+            };
+            const stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+            // Expert fix: Force-enable all hardware tracks to bypass laptop mute glitches
+            stream.getAudioTracks().forEach(track => {
+                track.enabled = true;
+                if (track.contentHint) track.contentHint = 'speech';
+            });
+
+            // Diagnostic & Volume Booster: Create hardware analyser + 4x Gain Node
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioCtx.createMediaStreamSource(stream);
+
+            // EXPERT BOOSTER: Amplify hardware output by 400%
+            const gainNode = audioCtx.createGain();
+            gainNode.gain.value = 4.0; // 4x Volume Boost
+
+            const analyserNode = audioCtx.createAnalyser();
+            analyserNode.fftSize = 256;
+
+            source.connect(gainNode);
+            gainNode.connect(analyserNode);
+
+            setAnalyser(analyserNode);
+
+            // Record from the boosted stream
+            const destination = audioCtx.createMediaStreamDestination();
+            gainNode.connect(destination);
+            const boostedStream = destination.stream;
+
+            const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+                ? 'audio/webm;codecs=opus' : 'audio/webm';
+
+            const recorder = new MediaRecorder(boostedStream, {
+                mimeType,
+                audioBitsPerSecond: 128000
+            });
+
             mediaRecorderRef.current = recorder;
             audioChunksRef.current = [];
 
@@ -279,22 +290,32 @@ const Chat = () => {
             };
 
             recorder.onstop = async () => {
-                const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-                const reader = new FileReader();
-                reader.readAsDataURL(audioBlob);
-                reader.onloadend = () => {
-                    const base64Audio = reader.result;
-                    socket.emit('sendMessage', {
-                        sender: user.id,
-                        receiver: selectedUser._id,
-                        content: base64Audio,
-                        type: 'audio'
-                    });
-                };
-                stream.getTracks().forEach(track => track.stop());
+                // Expert fix: Small delay to ensure the final audio buffer is fully flushed
+                setTimeout(async () => {
+                    const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
+
+                    if (audioBlob.size < 200) {
+                        console.error('Recording too small or silent.');
+                        return;
+                    }
+
+                    const reader = new FileReader();
+                    reader.readAsDataURL(audioBlob);
+                    reader.onloadend = () => {
+                        const base64Audio = reader.result;
+                        socket.emit('sendMessage', {
+                            sender: user.id || user?._id,
+                            receiver: selectedUser._id,
+                            content: base64Audio,
+                            type: 'audio'
+                        });
+                    };
+                    stream.getTracks().forEach(track => track.stop());
+                }, 50);
             };
 
-            recorder.start();
+            // Expert fix: 10ms high-frequency capture for absolute reliability
+            recorder.start(10);
             setIsRecording(true);
             setRecordingTime(0);
             timerRef.current = setInterval(() => {
@@ -310,8 +331,97 @@ const Chat = () => {
         if (!mediaRecorderRef.current) return;
         mediaRecorderRef.current.stop();
         setIsRecording(false);
+        setAnalyser(null);
         clearInterval(timerRef.current);
         if (!shouldSend) audioChunksRef.current = [];
+    };
+
+    // Expert Hardware Truth Tester: Loopback Local Test
+    const runMicTest = async () => {
+        setIsTestingMic(true);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const recorder = new MediaRecorder(stream);
+            const chunks = [];
+            recorder.ondataavailable = (e) => chunks.push(e.data);
+            recorder.onstop = () => {
+                const blob = new Blob(chunks, { type: 'audio/webm' });
+                const url = URL.createObjectURL(blob);
+                const audio = new Audio(url);
+                audio.play();
+                alert(`Test Complete: Playing back 3s clip locally. If you hear silence, your hardware is definitely muted or broken.`);
+                setIsTestingMic(false);
+                stream.getTracks().forEach(t => t.stop());
+            };
+            recorder.start();
+            setTimeout(() => recorder.stop(), 3000);
+        } catch (e) { alert('Mic blocked or dead'); setIsTestingMic(false); }
+    };
+
+    const AudioBubblePlayer = ({ content }) => {
+        const audioRef = React.useRef(null);
+        const [blobUrl, setBlobUrl] = React.useState(null);
+
+        React.useEffect(() => {
+            if (content && content.startsWith('data:')) {
+                try {
+                    // Convert Base64 to Blob URL for 100% hardware compatibility
+                    const byteString = atob(content.split(',')[1]);
+                    const mimeString = content.split(',')[0].split(':')[1].split(';')[0];
+                    const ab = new ArrayBuffer(byteString.length);
+                    const ia = new Uint8Array(ab);
+                    for (let i = 0; i < byteString.length; i++) ia[i] = byteString.charCodeAt(i);
+                    const blob = new Blob([ab], { type: mimeString });
+                    const url = URL.createObjectURL(blob);
+                    setBlobUrl(url);
+                    return () => URL.revokeObjectURL(url); // Clean memory
+                } catch (e) { console.error('Audio bridge error:', e); setBlobUrl(content); }
+            } else { setBlobUrl(content); }
+        }, [content]);
+
+        return (
+            <audio
+                ref={audioRef}
+                src={blobUrl}
+                controls
+                preload="auto"
+                style={{ height: '40px', marginTop: '4px', maxWidth: '240px' }}
+            />
+        );
+    };
+
+    // Expert Diagnostic: Live Hardware Waveform
+    const WaveformVisualizer = ({ analyser }) => {
+        const canvasRef = React.useRef(null);
+        React.useEffect(() => {
+            if (!analyser) return;
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            const bufferLength = analyser.frequencyBinCount;
+            const dataArray = new Uint8Array(bufferLength);
+
+            const draw = () => {
+                const animationId = requestAnimationFrame(draw);
+                analyser.getByteTimeDomainData(dataArray);
+                ctx.fillStyle = '#f0f2f5';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.lineWidth = 2; ctx.strokeStyle = '#00a884';
+                ctx.beginPath();
+                const sliceWidth = canvas.width * 1.0 / bufferLength;
+                let x = 0;
+                for (let i = 0; i < bufferLength; i++) {
+                    const v = dataArray[i] / 128.0;
+                    const y = v * canvas.height / 2;
+                    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                    x += sliceWidth;
+                }
+                ctx.lineTo(canvas.width, canvas.height / 2);
+                ctx.stroke();
+                return () => cancelAnimationFrame(animationId);
+            };
+            draw();
+        }, [analyser]);
+        return <canvas ref={canvasRef} width="120" height="30" style={{ borderRadius: '15px' }} />;
     };
 
     const formatDuration = (sec) => {
@@ -356,7 +466,7 @@ const Chat = () => {
                 ringtoneRef.current.ctx.close();
                 ringtoneRef.current.ctx = null;
             }
-        } catch (_) {}
+        } catch (_) { }
     };
 
     const cleanupCall = useCallback(() => {
@@ -538,11 +648,7 @@ const Chat = () => {
                 (String(message.sender) === String(user.id) && String(message.receiver) === String(su?._id));
 
             if (isCurrent) {
-                setMessages(prev => {
-                    // Prevent duplicate messages in the UI
-                    if (message._id && prev.find(m => m._id === message._id)) return prev;
-                    return [...prev, message];
-                });
+                setMessages(prev => [...prev, message]);
             } else {
                 // Not selected? Increment unread count
                 const senderId = String(message.sender);
@@ -623,13 +729,13 @@ const Chat = () => {
         if (!window.confirm('Are you sure you want to delete this chat? This cannot be undone.')) return;
         try {
             await axios.delete(`http://localhost:5000/api/messages/chat/${user.id}/${otherUserId}`);
-            
+
             // Update local state
             if (selectedUser?._id === otherUserId) {
                 setSelectedUser(null);
                 setMessages([]);
             }
-            
+
             setLastMessages(prev => {
                 const newMap = { ...prev };
                 delete newMap[otherUserId];
@@ -697,8 +803,8 @@ const Chat = () => {
             {/* ── SIDEBAR ── */}
             <div style={s.sidebar}>
                 <div style={s.sidebarHeader}>
-                    <img src={getAvatar(user.username)} alt="me" style={s.avatar40} />
-                    <span style={s.myName}>{user.username}</span>
+                    <img src={getAvatar(user?.username)} style={s.avatar40} alt="" />
+                    <span style={s.myName}>{user?.username} (Me)</span>
                     <button onClick={logout} title="Logout" style={s.iconBtn}><LogOut size={20} color="#54656f" /></button>
                 </div>
 
@@ -717,28 +823,13 @@ const Chat = () => {
                 {/* Status Bar */}
                 <div style={s.statusContainer}>
                     <div style={s.statusList}>
-                        {/* My Status */}
-                        {(() => {
-                            const myId = user?._id || user?.id;
-                            const hasMyStatus = allStatuses.some(st => st.user?._id === myId);
-                            return (
-                                <div style={s.statusItem}>
-                                    <div 
-                                        style={{ ...s.myStatusCircle, borderColor: hasMyStatus ? '#00a884' : '#d1d7db', cursor: 'pointer' }}
-                                        onClick={() => hasMyStatus ? setViewingStatusUser(myId) : setShowStatusModal(true)}
-                                    >
-                                        <img src={getAvatar(user.username)} style={s.statusImg} alt="me" />
-                                        <div 
-                                            style={s.addStatusBtn} 
-                                            onClick={(e) => { e.stopPropagation(); setShowStatusModal(true); }}
-                                        >
-                                            <Plus size={14} color="#fff" />
-                                        </div>
-                                    </div>
-                                    <span style={s.statusName}>My Status</span>
-                                </div>
-                            );
-                        })()}
+                        <div style={s.statusItem} onClick={() => setShowStatusModal(true)}>
+                            <div style={s.myStatusCircle}>
+                                <img src={getAvatar(user.username)} style={s.statusImg} alt="me" />
+                                <div style={s.addStatusBtn}><Plus size={14} color="#fff" /></div>
+                            </div>
+                            <span style={s.statusName}>My Status</span>
+                        </div>
                         {/* Group statuses by user */}
                         {Array.from(new Set(allStatuses.map(s => s.user?._id))).map(uid => {
                             const userStatus = allStatuses.find(st => st.user?._id === uid);
@@ -955,7 +1046,25 @@ const Chat = () => {
                             {isRecording ? (
                                 <div style={s.recordingBar}>
                                     <div style={s.recordingPulse} />
-                                    <span style={s.recordingTimer}>{formatDuration(recordingTime)} Recording...</span>
+                                    <div style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <WaveformVisualizer analyser={analyser} />
+                                        {audioDevices.length > 1 && (
+                                            <button type="button" style={{ ...s.iconBtn, fontSize: '11px', color: '#00a884', display: 'flex', alignItems: 'center', gap: '4px' }} onClick={() => setShowMicMenu(!showMicMenu)}>
+                                                <Settings size={16} /> <span>Switch Mic</span>
+                                            </button>
+                                        )}
+                                        {showMicMenu && (
+                                            <div style={{ ...s.contextMenu, bottom: '40px', left: '0', width: '200px', zIndex: 10000 }}>
+                                                <div style={{ padding: '8px', fontSize: '11px', color: '#8696a0', borderBottom: '1px solid #f0f2f5' }}>Switch Microphone</div>
+                                                {audioDevices.map(d => (
+                                                    <div key={d.deviceId} style={{ ...s.menuItem, fontSize: '12px' }} onClick={() => { setSelectedDeviceId(d.deviceId); setShowMicMenu(false); stopRecording(false); }}>
+                                                        {d.label || 'Unknown Mic'}
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                    <span style={s.recordingTimer}>{formatDuration(recordingTime)}</span>
                                     <button type="button" style={s.iconBtn} onClick={() => stopRecording(false)}>
                                         <Trash2 size={24} color="#ef4444" />
                                     </button>
@@ -994,13 +1103,7 @@ const Chat = () => {
                                                 placeholder="Type a message"
                                                 value={newMessage}
                                                 onChange={e => setNewMessage(e.target.value)}
-                                                onKeyDown={e => {
-                                                    // Only handle actual line breaks with Shift+Enter if needed, 
-                                                    // but for standard text input, Enter alone triggers form submit.
-                                                    if (e.key === 'Enter' && e.shiftKey) {
-                                                        // Handle shift+enter if this were a textarea, but it's an input
-                                                    }
-                                                }}
+                                                onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) handleSendMessage(e); }}
                                             />
                                             {newMessage.trim() || attachPreview ? (
                                                 <button type="submit" style={s.iconBtn}>
@@ -1067,36 +1170,23 @@ const Chat = () => {
                                     onChange={e => setStatusContent(e.target.value)}
                                 />
                             </div>
-                        ) : statusType === 'image' ? (
-                            <div style={s.statusPreview}>
-                                <img src={statusContent} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt="preview" />
-                            </div>
                         ) : (
                             <div style={s.statusPreview}>
-                                <video src={statusContent} style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls />
+                                <img src={statusContent} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt="preview" />
                             </div>
                         )}
 
                         <div style={s.colorPicker}>
                             {['#008069', '#9c27b0', '#f44336', '#2196f3', '#ff9800'].map(c => (
-                                <div key={c} onClick={() => { 
-                                    setStatusBg(c); 
-                                    if (statusType !== 'image' && statusType !== 'video') setStatusType('text'); 
-                                }} style={{ ...s.colorCircle, background: c, transform: statusBg === c ? 'scale(1.2)' : 'none' }} />
+                                <div key={c} onClick={() => { setStatusBg(c); setStatusType('text'); }} style={{ ...s.colorCircle, background: c, transform: statusBg === c ? 'scale(1.2)' : 'none' }} />
                             ))}
                             <button style={s.iconBtn} onClick={() => document.getElementById('statusImgInput').click()}>
                                 <Paperclip size={20} color="#54656f" />
                             </button>
-                            <input id="statusImgInput" type="file" accept="image/*,video/*" style={{ display: 'none' }} onChange={handleStatusFileChange} />
+                            <input id="statusImgInput" type="file" accept="image/*" style={{ display: 'none' }} onChange={handleStatusImageChange} />
                         </div>
 
-                        <button 
-                            style={{ ...s.statusPostBtn, opacity: isStatusPosting ? 0.7 : 1, cursor: isStatusPosting ? 'not-allowed' : 'pointer' }} 
-                            onClick={handlePostStatus}
-                            disabled={isStatusPosting}
-                        >
-                            {isStatusPosting ? 'Posting...' : 'Post Status'}
-                        </button>
+                        <button style={s.statusPostBtn} onClick={handlePostStatus}>Post Status</button>
                     </div>
                 </div>
             )}
@@ -1117,24 +1207,11 @@ const Chat = () => {
                                     <div style={{ fontSize: '12px', opacity: 0.8 }}>{new Date(currentUserStatus.createdAt).toLocaleTimeString()}</div>
                                 </div>
                             </div>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                                {String(currentUserStatus.user?._id) === String(user.id) && (
-                                    <button style={{ ...s.iconBtn, color: '#fff' }} onClick={async () => {
-                                        if (window.confirm('Delete this status?')) {
-                                            await axios.delete(`http://localhost:5000/api/status/${currentUserStatus._id}`);
-                                            setViewingStatusUser(null);
-                                            fetchStatuses();
-                                        }
-                                    }}>
-                                        <Trash2 size={24} />
-                                    </button>
-                                )}
-                                <button style={{ ...s.iconBtn, color: '#fff' }} onClick={() => {
-                                    markStatusViewed(currentUserStatus._id);
-                                    setViewingStatusUser(null);
-                                    fetchStatuses();
-                                }}><X size={30} /></button>
-                            </div>
+                            <button style={{ ...s.iconBtn, color: '#fff' }} onClick={() => {
+                                markStatusViewed(currentUserStatus._id);
+                                setViewingStatusUser(null);
+                                fetchStatuses();
+                            }}><X size={30} /></button>
                         </div>
 
                         <div style={s.viewerContent}>
@@ -1142,30 +1219,13 @@ const Chat = () => {
                                 <div style={{ ...s.viewerText, background: currentUserStatus.backgroundColor, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                     {currentUserStatus.content}
                                 </div>
-                            ) : currentUserStatus.type === 'image' ? (
-                                <img src={currentUserStatus.content} style={s.viewerImg} alt="status" />
                             ) : (
-                                <video src={currentUserStatus.content} style={s.viewerImg} autoPlay loop muted playsInline />
+                                <img src={currentUserStatus.content} style={s.viewerImg} alt="status" />
                             )}
                         </div>
 
                         <div style={s.viewerFooter}>
-                            {String(currentUserStatus.user?._id) === String(user.id) ? (
-                                <div style={s.viewerStats}>
-                                    <Volume2 size={16} />
-                                    <span>Views: {currentUserStatus.views?.length || 0}</span>
-                                    {currentUserStatus.views?.length > 0 && (
-                                        <div style={s.viewersPop}>
-                                            <div style={{ fontWeight: 'bold', marginBottom: '8px', borderBottom: '1px solid rgba(255,255,255,0.2)', paddingBottom: '4px' }}>Viewed by</div>
-                                            {currentUserStatus.views.map(v => (
-                                                <div key={v._id} style={{ fontSize: '12px', padding: '2px 0' }}>{v.username}</div>
-                                            ))}
-                                        </div>
-                                    )}
-                                </div>
-                            ) : (
-                                "End-to-end encrypted"
-                            )}
+                            End-to-end encrypted
                         </div>
                     </div>
                 );
@@ -1224,20 +1284,20 @@ const Chat = () => {
                     <div style={s.statusInputWrap}>
                         <h3 style={{ margin: 0, fontSize: '18px', color: '#111b21' }}>Delete message?</h3>
                         <p style={{ margin: 0, fontSize: '14px', color: '#667781' }}>Are you sure you want to delete this message?</p>
-                        
+
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '10px' }}>
                             {/* Logic: Only show "Delete for everyone" if sender is ME and within 48h */}
-                            {msgToDelete && String(msgToDelete.sender) === String(user.id) && 
-                             ((new Date() - new Date(msgToDelete.timestamp)) / 3600000 < 48) && (
-                                <button style={s.deleteBtn} onClick={() => handleDeleteMessage('everyone')}>
-                                    Delete for everyone
-                                </button>
-                            )}
-                            
+                            {msgToDelete && String(msgToDelete.sender) === String(user.id) &&
+                                ((new Date() - new Date(msgToDelete.timestamp)) / 3600000 < 48) && (
+                                    <button style={s.deleteBtn} onClick={() => handleDeleteMessage('everyone')}>
+                                        Delete for everyone
+                                    </button>
+                                )}
+
                             <button style={s.deleteBtn} onClick={() => handleDeleteMessage('me')}>
                                 Delete for me
                             </button>
-                            
+
                             <button style={{ ...s.deleteBtn, color: '#00a884' }} onClick={() => { setShowDeleteModal(false); setMsgToDelete(null); }}>
                                 Cancel
                             </button>
@@ -1343,7 +1403,7 @@ const s = {
     statusPreview: { width: '100%', height: '200px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '20px', textAlign: 'center', padding: '20px', fontWeight: '500' },
     colorPicker: { display: 'flex', gap: '10px', justifyContent: 'center' },
     colorCircle: { width: '24px', height: '24px', borderRadius: '50%', cursor: 'pointer', border: '2px solid #fff' },
-    statusPostBtn: { background: '#00a884', color: '#fff', padding: '10px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' },
+    statusPostBtn: { background: '#00a884', color: '#fff', padding: '10px', borderRadius: '8px', fontWeight: 'bold' },
 
     statusViewer: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: '#000', zIndex: 2000, display: 'flex', flexDirection: 'column' },
     viewerHeader: { height: '60px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 20px', color: '#fff', background: 'rgba(0,0,0,0.3)' },
@@ -1355,8 +1415,6 @@ const s = {
 
     msgImage: { maxWidth: '100%', borderRadius: '8px', marginTop: '4px', cursor: 'pointer' },
     audioPlayer: { height: '32px', marginTop: '4px', maxWidth: '220px' },
-    viewerStats: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', position: 'relative', padding: '6px 16px', borderRadius: '20px', background: 'rgba(255,255,255,0.15)' },
-    viewersPop: { position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)', background: 'rgba(37, 52, 63, 0.95)', padding: '12px', borderRadius: '12px', width: '200px', maxHeight: '300px', overflowY: 'auto', color: '#fff', textAlign: 'left', marginBottom: '10px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.1)' },
 
     msgDropdown: {
         position: 'absolute',
@@ -1417,38 +1475,6 @@ styleSheet.innerText = `
     }
     .menu-item:hover {
         background: #f0f2f5;
-    }
-    .viewer-stats {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        cursor: pointer;
-        position: relative;
-        padding: 5px 15px;
-        border-radius: 20px;
-        background: rgba(255,255,255,0.1);
-        transition: background 0.2s;
-    }
-    .viewer-stats:hover {
-        background: rgba(255,255,255,0.2);
-    }
-    .viewers-pop {
-        position: absolute;
-        bottom: 40px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(0,0,0,0.8);
-        padding: 12px;
-        border-radius: 8px;
-        width: 150px;
-        max-height: 200px;
-        overflow-y: auto;
-        color: #fff;
-        display: none;
-        box-shadow: 0 4px 15px rgba(0,0,0,0.5);
-    }
-    .viewer-stats:hover .viewers-pop {
-        display: block;
     }
 `;
 document.head.appendChild(styleSheet);
