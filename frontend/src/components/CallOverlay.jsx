@@ -60,6 +60,7 @@ export const ActiveCallOverlay = ({
 }) => {
     const localVideoRef = useRef(null);
     const remoteVideoRef = useRef(null);
+    const remoteAudioRef = useRef(null); // Dedicated Audio Bridge
     const [muted, setMuted] = useState(false);
     const [camOff, setCamOff] = useState(false);
     const [callDuration, setCallDuration] = useState(0);
@@ -75,6 +76,9 @@ export const ActiveCallOverlay = ({
     useEffect(() => {
         if (remoteVideoRef.current && remoteStream) {
             remoteVideoRef.current.srcObject = remoteStream;
+        }
+        if (remoteAudioRef.current && remoteStream) {
+            remoteAudioRef.current.srcObject = remoteStream;
         }
     }, [remoteStream]);
 
@@ -114,6 +118,9 @@ export const ActiveCallOverlay = ({
 
     return (
         <div style={callType === 'video' ? styles.videoCallBackdrop : styles.audioCallBackdrop}>
+            {/* Dedicated Audio Speaker (Hidden) */}
+            <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
+            
             {/* Remote video (full bg) */}
             {callType === 'video' && (
                 <video
