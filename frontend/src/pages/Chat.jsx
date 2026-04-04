@@ -15,6 +15,26 @@ const socket = io('http://localhost:5000');
 const getAvatar = (name) =>
     `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'User')}&background=008069&color=fff&size=128&bold=true`;
 const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const compressImage = (dataUrl, maxWidth = 1280, quality = 0.7) => {
+    return new Promise((resolve) => {
+        const img = new Image();
+        img.src = dataUrl;
+        img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let width = img.width;
+            let height = img.height;
+            if (width > maxWidth) {
+                height = (maxWidth / width) * height;
+                width = maxWidth;
+            }
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality));
+        };
+    });
+};
 
 const Chat = () => {
     const { user, logout } = useContext(AuthContext);
@@ -36,6 +56,7 @@ const Chat = () => {
     // Status related states
     const [allStatuses, setAllStatuses] = useState([]);
     const [showStatusModal, setShowStatusModal] = useState(false);
+    const [isStatusPosting, setIsStatusPosting] = useState(false);
     const [statusType, setStatusType] = useState('text'); // 'text' or 'image'
     const [statusContent, setStatusContent] = useState('');
     const [statusBg, setStatusBg] = useState('#008069');
@@ -117,27 +138,54 @@ const Chat = () => {
     };
 
     const handlePostStatus = async () => {
-        if (!statusContent) return;
+        if (!statusContent || isStatusPosting) return;
+        setIsStatusPosting(true);
         try {
+            const uid = user?._id || user?.id;
+            if (!uid) {
+                setIsStatusPosting(false);
+                return alert('Profile not loaded. Try again.');
+            }
+
             await axios.post('http://localhost:5000/api/status', {
-                userId: user.id,
+                userId: uid,
                 type: statusType,
                 content: statusContent,
                 backgroundColor: statusBg
             });
+            
+            // Expert fix: Close modal BEFORE clearing content to avoid broken image flicker
             setShowStatusModal(false);
             setStatusContent('');
+            setStatusType('text'); // Reset to default
             fetchStatuses();
-        } catch (err) { console.error('postStatus error', err); }
+        } catch (err) {
+            console.error('postStatus error', err);
+            alert('Status upload failed. Ensure the file is not too large.');
+        } finally {
+            setIsStatusPosting(false);
+        }
     };
 
-    const handleStatusImageChange = (e) => {
+    const handleStatusFileChange = (e) => {
         const file = e.target.files[0];
         if (!file) return;
+        
+        // Simple size safety for videos (Base64 videos are large)
+        if (file.type.startsWith('video/') && file.size > 12 * 1024 * 1024) {
+            return alert('Video is too large. Please select a clip smaller than 12MB.');
+        }
+
+        const isVideo = file.type.startsWith('video/');
         const reader = new FileReader();
-        reader.onload = (ev) => {
-            setStatusContent(ev.target.result);
-            setStatusType('image');
+        reader.onload = async (ev) => {
+            let content = ev.target.result;
+            if (!isVideo) {
+                // Compress image before setting state
+                content = await compressImage(content);
+            }
+            setStatusContent(content);
+            setStatusType(isVideo ? 'video' : 'image');
         };
         reader.readAsDataURL(file);
     };
@@ -669,13 +717,28 @@ const Chat = () => {
                 {/* Status Bar */}
                 <div style={s.statusContainer}>
                     <div style={s.statusList}>
-                        <div style={s.statusItem} onClick={() => setShowStatusModal(true)}>
-                            <div style={s.myStatusCircle}>
-                                <img src={getAvatar(user.username)} style={s.statusImg} alt="me" />
-                                <div style={s.addStatusBtn}><Plus size={14} color="#fff" /></div>
-                            </div>
-                            <span style={s.statusName}>My Status</span>
-                        </div>
+                        {/* My Status */}
+                        {(() => {
+                            const myId = user?._id || user?.id;
+                            const hasMyStatus = allStatuses.some(st => st.user?._id === myId);
+                            return (
+                                <div style={s.statusItem}>
+                                    <div 
+                                        style={{ ...s.myStatusCircle, borderColor: hasMyStatus ? '#00a884' : '#d1d7db', cursor: 'pointer' }}
+                                        onClick={() => hasMyStatus ? setViewingStatusUser(myId) : setShowStatusModal(true)}
+                                    >
+                                        <img src={getAvatar(user.username)} style={s.statusImg} alt="me" />
+                                        <div 
+                                            style={s.addStatusBtn} 
+                                            onClick={(e) => { e.stopPropagation(); setShowStatusModal(true); }}
+                                        >
+                                            <Plus size={14} color="#fff" />
+                                        </div>
+                                    </div>
+                                    <span style={s.statusName}>My Status</span>
+                                </div>
+                            );
+                        })()}
                         {/* Group statuses by user */}
                         {Array.from(new Set(allStatuses.map(s => s.user?._id))).map(uid => {
                             const userStatus = allStatuses.find(st => st.user?._id === uid);
@@ -1004,23 +1067,36 @@ const Chat = () => {
                                     onChange={e => setStatusContent(e.target.value)}
                                 />
                             </div>
-                        ) : (
+                        ) : statusType === 'image' ? (
                             <div style={s.statusPreview}>
                                 <img src={statusContent} style={{ width: '100%', height: '100%', objectFit: 'contain' }} alt="preview" />
+                            </div>
+                        ) : (
+                            <div style={s.statusPreview}>
+                                <video src={statusContent} style={{ width: '100%', height: '100%', objectFit: 'contain' }} controls />
                             </div>
                         )}
 
                         <div style={s.colorPicker}>
                             {['#008069', '#9c27b0', '#f44336', '#2196f3', '#ff9800'].map(c => (
-                                <div key={c} onClick={() => { setStatusBg(c); setStatusType('text'); }} style={{ ...s.colorCircle, background: c, transform: statusBg === c ? 'scale(1.2)' : 'none' }} />
+                                <div key={c} onClick={() => { 
+                                    setStatusBg(c); 
+                                    if (statusType !== 'image' && statusType !== 'video') setStatusType('text'); 
+                                }} style={{ ...s.colorCircle, background: c, transform: statusBg === c ? 'scale(1.2)' : 'none' }} />
                             ))}
                             <button style={s.iconBtn} onClick={() => document.getElementById('statusImgInput').click()}>
                                 <Paperclip size={20} color="#54656f" />
                             </button>
-                            <input id="statusImgInput" type="file" accept="image/*" style={{ display: 'none' }} onChange={handleStatusImageChange} />
+                            <input id="statusImgInput" type="file" accept="image/*,video/*" style={{ display: 'none' }} onChange={handleStatusFileChange} />
                         </div>
 
-                        <button style={s.statusPostBtn} onClick={handlePostStatus}>Post Status</button>
+                        <button 
+                            style={{ ...s.statusPostBtn, opacity: isStatusPosting ? 0.7 : 1, cursor: isStatusPosting ? 'not-allowed' : 'pointer' }} 
+                            onClick={handlePostStatus}
+                            disabled={isStatusPosting}
+                        >
+                            {isStatusPosting ? 'Posting...' : 'Post Status'}
+                        </button>
                     </div>
                 </div>
             )}
@@ -1041,11 +1117,24 @@ const Chat = () => {
                                     <div style={{ fontSize: '12px', opacity: 0.8 }}>{new Date(currentUserStatus.createdAt).toLocaleTimeString()}</div>
                                 </div>
                             </div>
-                            <button style={{ ...s.iconBtn, color: '#fff' }} onClick={() => {
-                                markStatusViewed(currentUserStatus._id);
-                                setViewingStatusUser(null);
-                                fetchStatuses();
-                            }}><X size={30} /></button>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                {String(currentUserStatus.user?._id) === String(user.id) && (
+                                    <button style={{ ...s.iconBtn, color: '#fff' }} onClick={async () => {
+                                        if (window.confirm('Delete this status?')) {
+                                            await axios.delete(`http://localhost:5000/api/status/${currentUserStatus._id}`);
+                                            setViewingStatusUser(null);
+                                            fetchStatuses();
+                                        }
+                                    }}>
+                                        <Trash2 size={24} />
+                                    </button>
+                                )}
+                                <button style={{ ...s.iconBtn, color: '#fff' }} onClick={() => {
+                                    markStatusViewed(currentUserStatus._id);
+                                    setViewingStatusUser(null);
+                                    fetchStatuses();
+                                }}><X size={30} /></button>
+                            </div>
                         </div>
 
                         <div style={s.viewerContent}>
@@ -1053,13 +1142,30 @@ const Chat = () => {
                                 <div style={{ ...s.viewerText, background: currentUserStatus.backgroundColor, width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
                                     {currentUserStatus.content}
                                 </div>
-                            ) : (
+                            ) : currentUserStatus.type === 'image' ? (
                                 <img src={currentUserStatus.content} style={s.viewerImg} alt="status" />
+                            ) : (
+                                <video src={currentUserStatus.content} style={s.viewerImg} autoPlay loop muted playsInline />
                             )}
                         </div>
 
                         <div style={s.viewerFooter}>
-                            End-to-end encrypted
+                            {String(currentUserStatus.user?._id) === String(user.id) ? (
+                                <div style={s.viewerStats}>
+                                    <Volume2 size={16} />
+                                    <span>Views: {currentUserStatus.views?.length || 0}</span>
+                                    {currentUserStatus.views?.length > 0 && (
+                                        <div style={s.viewersPop}>
+                                            <div style={{ fontWeight: 'bold', marginBottom: '8px', borderBottom: '1px solid rgba(255,255,255,0.2)', paddingBottom: '4px' }}>Viewed by</div>
+                                            {currentUserStatus.views.map(v => (
+                                                <div key={v._id} style={{ fontSize: '12px', padding: '2px 0' }}>{v.username}</div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            ) : (
+                                "End-to-end encrypted"
+                            )}
                         </div>
                     </div>
                 );
@@ -1237,7 +1343,7 @@ const s = {
     statusPreview: { width: '100%', height: '200px', borderRadius: '8px', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontSize: '20px', textAlign: 'center', padding: '20px', fontWeight: '500' },
     colorPicker: { display: 'flex', gap: '10px', justifyContent: 'center' },
     colorCircle: { width: '24px', height: '24px', borderRadius: '50%', cursor: 'pointer', border: '2px solid #fff' },
-    statusPostBtn: { background: '#00a884', color: '#fff', padding: '10px', borderRadius: '8px', fontWeight: 'bold' },
+    statusPostBtn: { background: '#00a884', color: '#fff', padding: '10px', borderRadius: '8px', fontWeight: 'bold', cursor: 'pointer' },
 
     statusViewer: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: '#000', zIndex: 2000, display: 'flex', flexDirection: 'column' },
     viewerHeader: { height: '60px', display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 20px', color: '#fff', background: 'rgba(0,0,0,0.3)' },
@@ -1249,6 +1355,8 @@ const s = {
 
     msgImage: { maxWidth: '100%', borderRadius: '8px', marginTop: '4px', cursor: 'pointer' },
     audioPlayer: { height: '32px', marginTop: '4px', maxWidth: '220px' },
+    viewerStats: { display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', position: 'relative', padding: '6px 16px', borderRadius: '20px', background: 'rgba(255,255,255,0.15)' },
+    viewersPop: { position: 'absolute', bottom: '100%', left: '50%', transform: 'translateX(-50%)', background: 'rgba(37, 52, 63, 0.95)', padding: '12px', borderRadius: '12px', width: '200px', maxHeight: '300px', overflowY: 'auto', color: '#fff', textAlign: 'left', marginBottom: '10px', boxShadow: '0 8px 32px rgba(0,0,0,0.4)', border: '1px solid rgba(255,255,255,0.1)' },
 
     msgDropdown: {
         position: 'absolute',
@@ -1309,6 +1417,38 @@ styleSheet.innerText = `
     }
     .menu-item:hover {
         background: #f0f2f5;
+    }
+    .viewer-stats {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        cursor: pointer;
+        position: relative;
+        padding: 5px 15px;
+        border-radius: 20px;
+        background: rgba(255,255,255,0.1);
+        transition: background 0.2s;
+    }
+    .viewer-stats:hover {
+        background: rgba(255,255,255,0.2);
+    }
+    .viewers-pop {
+        position: absolute;
+        bottom: 40px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: rgba(0,0,0,0.8);
+        padding: 12px;
+        border-radius: 8px;
+        width: 150px;
+        max-height: 200px;
+        overflow-y: auto;
+        color: #fff;
+        display: none;
+        box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    }
+    .viewer-stats:hover .viewers-pop {
+        display: block;
     }
 `;
 document.head.appendChild(styleSheet);
