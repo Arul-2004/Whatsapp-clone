@@ -481,7 +481,7 @@ const Chat = () => {
     }, [localStream]);
 
     const getMedia = async (type) => {
-        try {
+      try {
             const stream = await navigator.mediaDevices.getUserMedia({
                 audio: true,
                 video: type === 'video'
