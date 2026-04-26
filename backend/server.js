@@ -17,7 +17,8 @@ const io = new Server(server, {
     cors: {
         origin: 'http://localhost:5173', // Vite default port
         methods: ['GET', 'POST']
-    }
+    },
+    maxHttpBufferSize: 50e6 // 50MB limit for voice messages/files
 });
 
 // Middleware
@@ -39,14 +40,15 @@ io.on('connection', (socket) => {
         console.log(`User ${userId} joined their personal room`);
     });
 
-    socket.on('sendMessage', async ({ sender, receiver, content, type = 'text' }) => {
+    socket.on('sendMessage', async ({ sender, receiver, content, type = 'text', fileName = null, tempId = null }) => {
         try {
-            const newMessage = new Message({ sender, receiver, content, type });
+            const newMessage = new Message({ sender, receiver, content, type, fileName });
             await newMessage.save();
 
-            // Emit to receiver and sender
-            io.to(receiver).emit('receiveMessage', newMessage);
-            io.to(sender).emit('receiveMessage', newMessage);
+            // Send to receiver only
+            io.to(receiver).emit('receiveMessage', newMessage.toObject());
+            // Echo back to sender with tempId so they can replace the optimistic message
+            socket.emit('messageSent', { ...newMessage.toObject(), tempId });
         } catch (err) {
             console.error('Error sending message:', err);
         }
