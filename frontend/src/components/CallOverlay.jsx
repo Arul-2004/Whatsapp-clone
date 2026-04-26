@@ -66,7 +66,7 @@ export const ActiveCallOverlay = ({
     const [callDuration, setCallDuration] = useState(0);
     const timerRef = useRef(null);
 
-    // Bind streams to video elements
+    // Bind streams to video/audio elements
     useEffect(() => {
         if (localVideoRef.current && localStream) {
             localVideoRef.current.srcObject = localStream;
@@ -79,15 +79,23 @@ export const ActiveCallOverlay = ({
         }
         if (remoteAudioRef.current && remoteStream) {
             remoteAudioRef.current.srcObject = remoteStream;
+            // Explicit play() required by browser autoplay policy
+            remoteAudioRef.current.play().catch(e => console.warn('Audio play error:', e));
         }
     }, [remoteStream]);
 
-    // Timer — only runs once connected (remoteStream present)
+    // Timer — starts when remote stream arrives, resets on new call
+    useEffect(() => {
+        setCallDuration(0); // reset on mount
+        return () => {
+            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+        };
+    }, []);
+
     useEffect(() => {
         if (remoteStream && !timerRef.current) {
             timerRef.current = setInterval(() => setCallDuration(d => d + 1), 1000);
         }
-        return () => { if (timerRef.current) clearInterval(timerRef.current); };
     }, [remoteStream]);
 
     const formatDuration = (s) => {
@@ -120,7 +128,7 @@ export const ActiveCallOverlay = ({
         <div style={callType === 'video' ? styles.videoCallBackdrop : styles.audioCallBackdrop}>
             {/* Dedicated Audio Speaker (Hidden) */}
             <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
-            
+
             {/* Remote video (full bg) */}
             {callType === 'video' && (
                 <video
