@@ -48,6 +48,10 @@ const messageSchema = new mongoose.Schema({
     isForwarded: {
         type: Boolean,
         default: false
+    },
+    fileName: {
+        type: String,
+        default: null
     }
 }, { timestamps: true });
 
