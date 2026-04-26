@@ -11,7 +11,26 @@ import {
 } from 'lucide-react';
 import { IncomingCallOverlay, ActiveCallOverlay } from '../components/CallOverlay';
 
-const socket = io('http://localhost:5000');
+// Create socket with better configuration
+const socket = io('http://localhost:5000', {
+    reconnection: true,
+    reconnectionAttempts: 5,
+    reconnectionDelay: 1000,
+    transports: ['websocket', 'polling']
+});
+
+// Log socket events for debugging
+socket.on('connect', () => {
+    console.log('Socket connected:', socket.id);
+});
+
+socket.on('connect_error', (error) => {
+    console.error('Socket connection error:', error);
+});
+
+socket.on('disconnect', (reason) => {
+    console.log('Socket disconnected:', reason);
+});
 const getAvatar = (name) =>
     `https://ui-avatars.com/api/?name=${encodeURIComponent(name || 'User')}&background=008069&color=fff&size=128&bold=true`;
 const formatTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -74,12 +93,14 @@ const Chat = () => {
     const [remoteStream, setRemoteStream] = useState(null);
     const peerRef = useRef(null);              // RTCPeerConnection
     const ringtoneRef = useRef({ ctx: null, interval: null }); // Web Audio ringtone
+    const ringbackRef = useRef({ ctx: null, interval: null }); // Ringback tone for caller
     const pendingCandidatesRef = useRef([]);   // ICE candidates received before setRemoteDescription
     const selectedUserRef2 = useRef(null);     // mirror selectedUser for socket closures
     const localStreamRef = useRef(null);       // ref copy of localStream — avoids stale closures
     const callStatusRef = useRef('idle');      // ref copy of callStatus — safe to read in handlers
     const callPartnerRef = useRef(null);       // { id, name } of the person we're calling/answering
     const [callDeclinedToast, setCallDeclinedToast] = useState(false);
+    const [speakerOn, setSpeakerOn] = useState(false); // Speaker toggle state
     // ────────────────────────────────────────────────────
 
     // Keep ref in sync for socket handlers
@@ -485,8 +506,53 @@ const Chat = () => {
         } catch (_) { }
     };
 
+    // Play ringback tone (what caller hears while waiting) - like real WhatsApp
+    const startRingback = () => {
+        try {
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            ringbackRef.current.ctx = ctx;
+            const playOnce = () => {
+                // Create a pleasant "ring-ring" pattern like WhatsApp
+                const o1 = ctx.createOscillator();
+                const o2 = ctx.createOscillator();
+                const gain = ctx.createGain();
+                o1.connect(gain); o2.connect(gain); gain.connect(ctx.destination);
+                o1.type = 'sine'; o1.frequency.value = 440;
+                o2.type = 'sine'; o2.frequency.value = 480;
+                // First ring
+                gain.gain.setValueAtTime(0, ctx.currentTime);
+                gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + 0.05);
+                gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + 0.4);
+                gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+                // Second ring (delayed)
+                gain.gain.setValueAtTime(0, ctx.currentTime + 0.6);
+                gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + 0.65);
+                gain.gain.linearRampToValueAtTime(0.25, ctx.currentTime + 1.0);
+                gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.1);
+                o1.start(ctx.currentTime); o2.start(ctx.currentTime);
+                o1.stop(ctx.currentTime + 1.2); o2.stop(ctx.currentTime + 1.2);
+            };
+            playOnce();
+            ringbackRef.current.interval = setInterval(playOnce, 2500);
+        } catch (e) { console.warn('Ringback error:', e); }
+    };
+
+    const stopRingback = () => {
+        try {
+            if (ringbackRef.current.interval) {
+                clearInterval(ringbackRef.current.interval);
+                ringbackRef.current.interval = null;
+            }
+            if (ringbackRef.current.ctx) {
+                ringbackRef.current.ctx.close();
+                ringbackRef.current.ctx = null;
+            }
+        } catch (_) { }
+    };
+
     const cleanupCall = useCallback(() => {
         stopRinging();
+        stopRingback(); // Stop ringback tone when call ends
         pendingCandidatesRef.current = [];
         if (peerRef.current) { peerRef.current.close(); peerRef.current = null; }
         // Use ref — no stale closure issue
@@ -527,7 +593,10 @@ const Chat = () => {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' }
+                { urls: 'stun:stun2.l.google.com:19302' },
+                // Add TURN servers for NAT traversal (free public TURN servers)
+                { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+                { urls: 'turn:global.turn.twilio.com:3478', username: 'free', credential: 'free' }
             ]
         });
         stream.getTracks().forEach(track => pc.addTrack(track, stream));
@@ -565,7 +634,7 @@ const Chat = () => {
         setCallType(type);
         setCallStatus('calling');
         pendingCandidatesRef.current = [];
-        startRingtone();
+        startRingback(); // Caller hears ringback tone while waiting
 
         const pc = createPeer(stream, selectedUser._id);
         peerRef.current = pc;
@@ -573,6 +642,8 @@ const Chat = () => {
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
+        console.log('Initiating call to:', selectedUser._id, 'from:', user.id);
+        
         socket.emit('callUser', {
             to: selectedUser._id,
             from: user.id,
@@ -631,6 +702,7 @@ const Chat = () => {
     // ── Socket listeners for calling ───────────────────────────────
     useEffect(() => {
         const onIncomingCall = (data) => {
+            console.log('Incoming call received:', data);
             // Busy: already in a call — auto-reject
             if (callStatusRef.current !== 'idle') {
                 socket.emit('rejectCall', { to: data.from });
@@ -645,6 +717,7 @@ const Chat = () => {
 
         const onCallAccepted = async ({ signal }) => {
             stopRinging();
+            stopRingback(); // Stop ringback when call is connected
             if (peerRef.current) {
                 await peerRef.current.setRemoteDescription(new RTCSessionDescription(signal));
                 await flushPendingCandidates(peerRef.current);
@@ -663,8 +736,12 @@ const Chat = () => {
             catch (e) { console.warn('ICE add error:', e); }
         };
 
-        const onCallEnded = () => cleanupCall();
-        const onCallRejected = () => {
+        const onCallEnded = () => {
+            console.log('Call ended by remote');
+            cleanupCall();
+        };
+        const onCallRejected = ({ reason }) => {
+            console.log('Call rejected, reason:', reason);
             cleanupCall();
             // Toast instead of alert
             setCallDeclinedToast(true);
@@ -676,6 +753,12 @@ const Chat = () => {
         socket.on('iceCandidate', onIceCandidate);
         socket.on('callEnded', onCallEnded);
         socket.on('callRejected', onCallRejected);
+        socket.on('callBusy', ({ from, fromName }) => {
+            console.log('Call busy - recipient is in another call');
+            cleanupCall();
+            setCallDeclinedToast(true);
+            setTimeout(() => setCallDeclinedToast(false), 3000);
+        });
 
         return () => {
             socket.off('incomingCall', onIncomingCall);
@@ -683,6 +766,7 @@ const Chat = () => {
             socket.off('iceCandidate', onIceCandidate);
             socket.off('callEnded', onCallEnded);
             socket.off('callRejected', onCallRejected);
+            socket.off('callBusy', onCallRejected);
         };
     }, []); // No deps — cleanupCall is now stable
     // ──────────────────────────────────────────────────────────────────
@@ -1398,6 +1482,8 @@ const Chat = () => {
                     remoteStream={remoteStream}
                     onEndCall={endCall}
                     isCalling={callStatus === 'calling'}
+                    speakerOn={speakerOn}
+                    onToggleSpeaker={() => setSpeakerOn(!speakerOn)}
                 />
             )}
 
