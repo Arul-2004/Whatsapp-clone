@@ -72,7 +72,18 @@ io.on('connection', (socket) => {
 
     // ── WebRTC Signaling ──────────────────────────────────────────
     socket.on('callUser', ({ to, from, fromName, signal, callType }) => {
-        io.to(to).emit('incomingCall', { from, fromName, signal, callType });
+        console.log(`Call from ${from} to ${to}, callType: ${callType}`);
+        
+        // Get all sockets in the target user's room
+        const roomSockets = io.sockets.adapter.rooms.get(to);
+        if (roomSockets && roomSockets.size > 0) {
+            io.to(to).emit('incomingCall', { from, fromName, signal, callType });
+            console.log(`Emitted incomingCall to room ${to}, ${roomSockets.size} socket(s)`);
+        } else {
+            // Fallback: emit to all sockets (for debugging)
+            console.log(`User ${to} not in room, broadcasting to all`);
+            socket.broadcast.emit('incomingCall', { from, fromName, signal, callType });
+        }
     });
 
     socket.on('answerCall', ({ to, signal }) => {
@@ -87,8 +98,13 @@ io.on('connection', (socket) => {
         io.to(to).emit('callEnded');
     });
 
-    socket.on('rejectCall', ({ to }) => {
-        io.to(to).emit('callRejected');
+    socket.on('rejectCall', ({ to, reason = 'declined' }) => {
+        io.to(to).emit('callRejected', { reason });
+    });
+
+    // Handle busy signal - when user is already in a call
+    socket.on('callBusy', ({ to, from, fromName }) => {
+        io.to(to).emit('callBusy', { from, fromName });
     });
     // ─────────────────────────────────────────────────────────────
 
