@@ -76,6 +76,10 @@ const Chat = () => {
     const ringtoneRef = useRef({ ctx: null, interval: null }); // Web Audio ringtone
     const pendingCandidatesRef = useRef([]);   // ICE candidates received before setRemoteDescription
     const selectedUserRef2 = useRef(null);     // mirror selectedUser for socket closures
+    const localStreamRef = useRef(null);       // ref copy of localStream — avoids stale closures
+    const callStatusRef = useRef('idle');      // ref copy of callStatus — safe to read in handlers
+    const callPartnerRef = useRef(null);       // { id, name } of the person we're calling/answering
+    const [callDeclinedToast, setCallDeclinedToast] = useState(false);
     // ────────────────────────────────────────────────────
 
     // Keep ref in sync for socket handlers
@@ -117,6 +121,7 @@ const Chat = () => {
             res.data.forEach(item => {
                 map[String(item._id)] = {
                     content: item.lastMessage.content,
+                    type: item.lastMessage.type || 'text',
                     timestamp: item.lastMessage.timestamp
                 };
             });
@@ -290,24 +295,35 @@ const Chat = () => {
             };
 
             recorder.onstop = async () => {
-                // Expert fix: Small delay to ensure the final audio buffer is fully flushed
                 setTimeout(async () => {
                     const audioBlob = new Blob(audioChunksRef.current, { type: recorder.mimeType });
-
-                    if (audioBlob.size < 200) {
-                        console.error('Recording too small or silent.');
-                        return;
-                    }
+                    if (audioBlob.size < 200) { console.error('Recording too small or silent.'); return; }
 
                     const reader = new FileReader();
                     reader.readAsDataURL(audioBlob);
                     reader.onloadend = () => {
                         const base64Audio = reader.result;
+                        const su = selectedUserRef.current;
+                        if (!su) return;
+
+                        // Generate tempId so sender sees audio immediately
+                        const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+                        setMessages(prev => [...prev, {
+                            _id: tempId,
+                            sender: user.id || user?._id,
+                            receiver: su._id,
+                            content: base64Audio,
+                            type: 'audio',
+                            timestamp: new Date(),
+                            status: 'sent'
+                        }]);
+
                         socket.emit('sendMessage', {
                             sender: user.id || user?._id,
-                            receiver: selectedUser._id,
+                            receiver: su._id,
                             content: base64Audio,
-                            type: 'audio'
+                            type: 'audio',
+                            tempId
                         });
                     };
                     stream.getTracks().forEach(track => track.stop());
@@ -473,17 +489,29 @@ const Chat = () => {
         stopRinging();
         pendingCandidatesRef.current = [];
         if (peerRef.current) { peerRef.current.close(); peerRef.current = null; }
-        if (localStream) { localStream.getTracks().forEach(t => t.stop()); }
+        // Use ref — no stale closure issue
+        if (localStreamRef.current) {
+            localStreamRef.current.getTracks().forEach(t => t.stop());
+            localStreamRef.current = null;
+        }
+        callPartnerRef.current = null;
+        callStatusRef.current = 'idle';
         setLocalStream(null);
         setRemoteStream(null);
         setCallStatus('idle');
         setIncomingCall(null);
-    }, [localStream]);
+    }, []); // Stable reference — no deps needed
 
     const getMedia = async (type) => {
-      try {
+        try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                audio: true,
+                audio: { 
+                    echoCancellation: true, 
+                    noiseSuppression: true, 
+                    autoGainControl: true,
+                    sampleRate: 48000,
+                    latency: 0
+                },
                 video: type === 'video'
             });
             return stream;
@@ -522,9 +550,17 @@ const Chat = () => {
     // Initiate a call
     const initiateCall = async (type) => {
         if (!selectedUser) return;
+        // Guard: only block if we are ACTUALLY in a call (localStream is live)
+        if (callStatusRef.current !== 'idle' && localStream) return;
+        // Reset stale ref state (safety)
+        callStatusRef.current = 'idle';
+
         const stream = await getMedia(type);
         if (!stream) return;
 
+        localStreamRef.current = stream;
+        callPartnerRef.current = { id: selectedUser._id, name: selectedUser.username };
+        callStatusRef.current = 'calling';
         setLocalStream(stream);
         setCallType(type);
         setCallStatus('calling');
@@ -555,6 +591,9 @@ const Chat = () => {
         const stream = await getMedia(resolvedType);
         if (!stream) return;
 
+        localStreamRef.current = stream;
+        callPartnerRef.current = { id: incomingCall.from, name: incomingCall.fromName };
+        callStatusRef.current = 'active';
         setLocalStream(stream);
         setCallType(incomingCall.callType);
         setCallStatus('active');
@@ -563,7 +602,6 @@ const Chat = () => {
         peerRef.current = pc;
 
         await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.signal));
-        // Flush ICE candidates that arrived before this point
         await flushPendingCandidates(pc);
 
         const answer = await pc.createAnswer();
@@ -584,8 +622,8 @@ const Chat = () => {
 
     // End active call
     const endCall = () => {
-        const other = selectedUserRef2.current;
-        if (other) socket.emit('endCall', { to: other._id });
+        // Use callPartnerRef — reliable even if selectedUser changed
+        if (callPartnerRef.current) socket.emit('endCall', { to: callPartnerRef.current.id });
         cleanupCall();
     };
     // ──────────────────────────────────────────────────────────────────
@@ -593,25 +631,30 @@ const Chat = () => {
     // ── Socket listeners for calling ───────────────────────────────
     useEffect(() => {
         const onIncomingCall = (data) => {
-            pendingCandidatesRef.current = []; // reset for new call
+            // Busy: already in a call — auto-reject
+            if (callStatusRef.current !== 'idle') {
+                socket.emit('rejectCall', { to: data.from });
+                return;
+            }
+            pendingCandidatesRef.current = [];
             setIncomingCall(data);
+            callStatusRef.current = 'ringing';
             setCallStatus('ringing');
-            startRingtone(); // Web Audio ringtone — works with no network
+            startRingtone();
         };
 
         const onCallAccepted = async ({ signal }) => {
             stopRinging();
             if (peerRef.current) {
                 await peerRef.current.setRemoteDescription(new RTCSessionDescription(signal));
-                // Flush ICE candidates queued before remote description was set
                 await flushPendingCandidates(peerRef.current);
+                callStatusRef.current = 'active';
                 setCallStatus('active');
             }
         };
 
         const onIceCandidate = async ({ candidate }) => {
             if (!candidate) return;
-            // If peer not ready or no remote description yet — queue the candidate
             if (!peerRef.current || !peerRef.current.remoteDescription) {
                 pendingCandidatesRef.current.push(candidate);
                 return;
@@ -621,7 +664,12 @@ const Chat = () => {
         };
 
         const onCallEnded = () => cleanupCall();
-        const onCallRejected = () => { cleanupCall(); alert('📵 Call was declined.'); };
+        const onCallRejected = () => {
+            cleanupCall();
+            // Toast instead of alert
+            setCallDeclinedToast(true);
+            setTimeout(() => setCallDeclinedToast(false), 3000);
+        };
 
         socket.on('incomingCall', onIncomingCall);
         socket.on('callAccepted', onCallAccepted);
@@ -636,25 +684,24 @@ const Chat = () => {
             socket.off('callEnded', onCallEnded);
             socket.off('callRejected', onCallRejected);
         };
-    }, [cleanupCall]);
+    }, []); // No deps — cleanupCall is now stable
     // ──────────────────────────────────────────────────────────────────
 
     // Real-time incoming messages
     useEffect(() => {
+        // receiveMessage: only fires for the RECEIVER now (server no longer echoes back to sender)
         const handler = (message) => {
             const su = selectedUserRef.current;
-            const isCurrent =
-                (String(message.sender) === String(su?._id) && String(message.receiver) === String(user.id)) ||
-                (String(message.sender) === String(user.id) && String(message.receiver) === String(su?._id));
+            // Only process messages that are genuinely incoming (sender is the other user)
+            const isIncoming = String(message.sender) === String(su?._id) && String(message.receiver) === String(user.id);
+            const isForOtherChat = String(message.receiver) === String(user.id) && String(message.sender) !== String(su?._id);
 
-            if (isCurrent) {
+            if (isIncoming) {
                 setMessages(prev => [...prev, message]);
-            } else {
-                // Not selected? Increment unread count
+            } else if (isForOtherChat) {
+                // Not the active chat — increment unread count
                 const senderId = String(message.sender);
-                if (senderId !== String(user.id)) {
-                    setUnreadCounts(prev => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
-                }
+                setUnreadCounts(prev => ({ ...prev, [senderId]: (prev[senderId] || 0) + 1 }));
             }
 
             // Always update sidebar last message
@@ -663,11 +710,28 @@ const Chat = () => {
                 : String(message.sender);
             setLastMessages(prev => ({
                 ...prev,
-                [otherId]: { content: message.content, timestamp: message.timestamp || new Date() }
+                [otherId]: { content: message.content, type: message.type, timestamp: message.timestamp || new Date() }
             }));
         };
 
-        socket.on('receiveMessage', handler);
+        // messageSent: replace the optimistic message (matched by tempId) with the real DB record
+        const sentHandler = (savedMessage) => {
+            const { tempId, ...realMsg } = savedMessage;
+            setMessages(prev => {
+                if (tempId) {
+                    // Replace optimistic placeholder by tempId
+                    const found = prev.some(m => m._id === tempId);
+                    if (found) return prev.map(m => m._id === tempId ? realMsg : m);
+                }
+                // Fallback: just append (e.g. if tempId missing)
+                return [...prev, realMsg];
+            });
+            const otherId = String(savedMessage.receiver);
+            setLastMessages(prev => ({
+                ...prev,
+                [otherId]: { content: savedMessage.content, type: savedMessage.type, timestamp: savedMessage.timestamp || new Date() }
+            }));
+        };
 
         const deleteHandler = ({ messageId, type }) => {
             if (type === 'everyone') {
@@ -681,11 +745,14 @@ const Chat = () => {
             setMessages(prev => prev.map(m => m._id === updatedMsg._id ? updatedMsg : m));
         };
 
+        socket.on('receiveMessage', handler);
+        socket.on('messageSent', sentHandler);
         socket.on('messageDeleted', deleteHandler);
         socket.on('messageEdited', editHandler);
 
         return () => {
             socket.off('receiveMessage', handler);
+            socket.off('messageSent', sentHandler);
             socket.off('messageDeleted', deleteHandler);
             socket.off('messageEdited', editHandler);
         };
@@ -730,30 +797,10 @@ const Chat = () => {
         try {
             await axios.delete(`http://localhost:5000/api/messages/chat/${user.id}/${otherUserId}`);
 
-            // Update local state
-            if (selectedUser?._id === otherUserId) {
-                setSelectedUser(null);
-                setMessages([]);
-            }
+            // Clear only the chat window messages — sidebar last message stays visible
+            setMessages([]);
 
-            setLastMessages(prev => {
-                const newMap = { ...prev };
-                delete newMap[otherUserId];
-                return newMap;
-            });
-
-            // Refresh sidebar last message data to reflect deleted conversation state
-            fetchLastMessages();
-
-            setUnreadCounts(prev => {
-                const newCounts = { ...prev };
-                delete newCounts[otherUserId];
-                return newCounts;
-            });
-
-            setSidebarContextMenu(null);
             setShowHeaderMenu(false);
-            alert('Chat deleted successfully.');
         } catch (err) {
             console.error('deleteChat error', err);
             alert('Failed to delete chat.');
@@ -762,18 +809,23 @@ const Chat = () => {
 
     const handleSendMessage = (e) => {
         e && e.preventDefault();
-        const content = newMessage.trim();
-        if (!content || !selectedUser) return;
-
         const isImage = !!attachPreview?.isImage;
         const type = isImage ? 'image' : (attachPreview ? 'file' : 'text');
+        const fileName = attachPreview?.name || null;
+        const content = attachPreview ? attachPreview.url : newMessage.trim();
+        if (!content || !selectedUser) return;
 
-        socket.emit('sendMessage', {
+        const tempId = `temp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        setMessages(prev => [...prev, {
+            _id: tempId,
             sender: user.id,
             receiver: selectedUser._id,
-            content,
-            type
-        });
+            content, type, fileName,
+            timestamp: new Date(),
+            status: 'sent'
+        }]);
+
+        socket.emit('sendMessage', { sender: user.id, receiver: selectedUser._id, content, type, fileName, tempId });
         setNewMessage('');
         setAttachPreview(null);
         setShowEmojiPicker(false);
@@ -788,7 +840,8 @@ const Chat = () => {
         const reader = new FileReader();
         reader.onload = (ev) => {
             setAttachPreview({ name: file.name, url: ev.target.result, isImage });
-            setNewMessage(`[File: ${file.name}]`);
+            // Show a friendly label in the input box
+            setNewMessage(isImage ? '' : `📎 ${file.name}`);
         };
         reader.readAsDataURL(file);
         e.target.value = '';
@@ -879,7 +932,12 @@ const Chat = () => {
                                         </div>
                                     </div>
                                     <span style={s.lastMsg}>
-                                        {lm ? lm.content : (u.status || 'Hey there! I am using WhatsApp.')}
+                                        {lm
+                                            ? (lm.type === 'image' ? '📷 Photo'
+                                                : lm.type === 'audio' ? '🎤 Voice message'
+                                                : lm.type === 'file' ? '📎 File'
+                                                : lm.content)
+                                            : (u.status || 'Hey there! I am using WhatsApp.')}
                                     </span>
                                 </div>
                             </div>
@@ -922,7 +980,10 @@ const Chat = () => {
                                         <MoreVertical size={20} color="#54656f" />
                                     </button>
                                     {showHeaderMenu && (
-                                        <div style={{ ...s.contextMenu, right: 0, top: '40px', width: '180px' }}>
+                                        <div
+                                            style={{ ...s.contextMenu, right: 0, top: '40px', width: '180px' }}
+                                            onMouseDown={e => e.stopPropagation()}
+                                        >
                                             <div style={s.menuItem} onClick={() => alert('Contact Info')}>
                                                 <Info size={16} /> Contact Info
                                             </div>
@@ -1001,7 +1062,21 @@ const Chat = () => {
                                                     {msg.type === 'image' ? (
                                                         <img src={msg.content} alt="sent" style={s.msgImage} />
                                                     ) : msg.type === 'audio' ? (
-                                                        <audio src={msg.content} controls style={s.audioPlayer} />
+                                                        <AudioBubblePlayer content={msg.content} />
+                                                    ) : msg.type === 'file' ? (
+                                                        <a
+                                                            href={msg.content}
+                                                            download={msg.fileName || 'file'}
+                                                            style={{
+                                                                display: 'flex', alignItems: 'center', gap: '8px',
+                                                                padding: '8px 12px', borderRadius: '8px',
+                                                                background: 'rgba(0,168,132,0.1)',
+                                                                color: '#008069', textDecoration: 'none',
+                                                                fontSize: '13px', fontWeight: 500
+                                                            }}
+                                                        >
+                                                            <File size={18} /> {msg.fileName || 'Download File'}
+                                                        </a>
                                                     ) : (
                                                         <p style={s.msgText}>{msg.content}</p>
                                                     )}
@@ -1318,12 +1393,24 @@ const Chat = () => {
             {(callStatus === 'calling' || callStatus === 'active') && (
                 <ActiveCallOverlay
                     callType={callType}
-                    callerName={selectedUser?.username || ''}
+                    callerName={callPartnerRef.current?.name || selectedUser?.username || ''}
                     localStream={localStream}
                     remoteStream={remoteStream}
                     onEndCall={endCall}
                     isCalling={callStatus === 'calling'}
                 />
+            )}
+
+            {/* ── CALL DECLINED TOAST ── */}
+            {callDeclinedToast && (
+                <div style={{
+                    position: 'fixed', bottom: '30px', left: '50%', transform: 'translateX(-50%)',
+                    background: '#1f2937', color: '#fff', padding: '12px 24px', borderRadius: '12px',
+                    fontSize: '14px', zIndex: 9999, display: 'flex', alignItems: 'center', gap: '8px',
+                    boxShadow: '0 4px 20px rgba(0,0,0,0.3)', animation: 'fadeIn .2s ease'
+                }}>
+                    📵 Call was declined
+                </div>
             )}
         </div>
     );
